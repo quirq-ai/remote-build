@@ -19,8 +19,21 @@ jobs:
           python-version: "3.14"
       - run: python -m pip install --quiet -e ".[test]"
       - run: python -m pytest -q -p no:cacheprovider
-      - name: selftest on the local backend
-        run: qqrbe selftest --backend local
+      - name: re-running an unchanged action is a reported cache hit (V0-RBE-02)
+        run: |
+          qqrbe selftest --cache "$RUNNER_TEMP/cache"
+          qqrbe selftest --cache "$RUNNER_TEMP/cache" --json | tee "$RUNNER_TEMP/second.json"
+          python - "$RUNNER_TEMP/second.json" <<'PY'
+          import json, sys
+          cache = json.load(open(sys.argv[1]))["details"].get("cache")
+          sys.exit(0 if cache == "hit" else f"second run was a cache {cache}, not a hit")
+          PY
+      - name: a backend that cannot run is a typed, counted fallback (V0-RBE-02)
+        # No token is set in this job, so the github backend is unavailable.
+        run: |
+          qqrbe selftest --backend github --fallback local --no-cache --cache "$RUNNER_TEMP/cache"
+          qqrbe stats --cache "$RUNNER_TEMP/cache" | tee "$RUNNER_TEMP/stats.txt"
+          grep -q "fallback github->local (backend-unavailable): 1" "$RUNNER_TEMP/stats.txt"
   cross-backend:
     # V0-RBE-01 done-when: the same deterministic action gives the same output digest on the local
     # backend (this job's runner) and the github backend (a second runner, through execute.yml).
@@ -38,13 +51,13 @@ jobs:
         with:
           python-version: "3.14"
       - run: python -m pip install --quiet -e .
-      - run: qqrbe selftest --backend local --json > "$RUNNER_TEMP/local.json"
+      - run: qqrbe selftest --backend local --no-cache --json > "$RUNNER_TEMP/local.json"
       - name: selftest on the github backend
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REF: ${{ github.head_ref || github.ref_name }}
         run: >-
-          qqrbe selftest --backend github --json --option "ref=$REF"
+          qqrbe selftest --backend github --no-cache --json --option "ref=$REF"
           --option "repository=$GITHUB_REPOSITORY" > "$RUNNER_TEMP/github.json"
       - name: same output digest on both
         run: |

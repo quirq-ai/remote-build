@@ -161,14 +161,22 @@ class GitHubExecutor(Executor):
         if res.get("action_digest") != request.action.digest():
             raise RemoteExecutionFailed(f"worker run {url} reports action {res.get('action_digest')},"
                                         f" not the requested {request.action.digest()}")
-        if set(res.get("output_digests", {})) != set(request.action.outputs):
+        if not isinstance(res.get("output_digests"), dict) or not isinstance(packed.get("outputs", {}), dict):
+            raise RemoteExecutionFailed(f"worker run {url} sent a malformed result")
+        if set(res["output_digests"]) != set(request.action.outputs):
             raise RemoteExecutionFailed(f"worker run {url} reports outputs {sorted(res.get('output_digests', {}))},"
                                         f" not the declared {sorted(request.action.outputs)}")
         root = root.resolve()
         cwd = (Path(env.repo) / request.action.workdir).resolve()
+        for path in request.action.outputs:  # an output the remote did not produce must not linger
+            stale = cwd / path
+            if stale.is_dir() and not stale.is_symlink():
+                shutil.rmtree(stale)
+            elif stale.exists() or stale.is_symlink():
+                stale.unlink()
         for path, stored in packed.get("outputs", {}).items():
             src = (root / stored).resolve()
-            if path not in request.action.outputs or not src.is_relative_to(root):
+            if path not in request.action.outputs or src == root or not src.is_relative_to(root):
                 raise RemoteExecutionFailed(f"worker run {url} names output {path!r} at {stored!r},"
                                             " outside what was asked for")
             if digest.path_digest(src) != res["output_digests"].get(path):

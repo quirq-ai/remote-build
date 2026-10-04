@@ -1,8 +1,11 @@
 """qqrbe: run REAPI-shaped actions on an executor backend.
 
     qqrbe backends                                       the backends this install has
-    qqrbe exec --request FILE --backend NAME [--option KEY=VALUE ...]
-    qqrbe selftest --backend NAME [--option KEY=VALUE ...] [--json]
+    qqrbe exec --request FILE --backend NAME [--option KEY=VALUE ...] [--fallback local]
+    qqrbe selftest --backend NAME [--option KEY=VALUE ...] [--fallback local] [--json]
+    qqrbe stats                                          cache hits and misses, fallbacks by reason
+
+exec and selftest use the action cache in <repo>/.qq/cache unless --no-cache is given.
     qqrbe compare A.json B.json                          same action, same output digests?
     qqrbe worker --request FILE --repo DIR --out DIR     the remote side of a backend
     qqrbe worker-source --request FILE                   the request's source, as CI step outputs
@@ -16,7 +19,7 @@ from pathlib import Path
 
 from qqrecipes import runner
 
-from qqrbe import executor, selftest, worker
+from qqrbe import cache as qqcache, executor, selftest, worker
 from qqrbe.errors import ExecutorError
 
 
@@ -30,11 +33,27 @@ def parse_options(values: list[str]) -> dict[str, str]:
     return options
 
 
+def cache_dir(args) -> Path:
+    return Path(args.cache).resolve() if args.cache else Path(args.repo).resolve() / qqcache.DEFAULT_DIR
+
+
+def build_executor(args) -> executor.Executor:
+    """The backend, wrapped in a fallback (if asked) and then the cache (unless --no-cache)."""
+    ex = executor.load(args.backend, **parse_options(args.option))
+    cache = None if args.no_cache else qqcache.ActionCache(cache_dir(args))
+    if args.fallback and args.fallback != args.backend:
+        stats = cache.stats if cache else qqcache.Stats(cache_dir(args) / "stats.json")
+        ex = qqcache.FallbackExecutor(ex, executor.load(args.fallback), stats)
+    if cache is not None:
+        ex = qqcache.CachingExecutor(ex, cache)
+    return ex
+
+
 def _execute(args, request) -> int:
     repo = Path(args.repo).resolve()
     env = runner.Env(repo=repo, out=Path(args.out).resolve())
     try:
-        result = executor.load(args.backend, **parse_options(args.option)).execute(request, env)
+        result = build_executor(args).execute(request, env)
     except ExecutorError as e:
         print(f"qqrbe: {args.backend}: {e.reason}: {e}", file=sys.stderr)
         return 2
@@ -98,6 +117,21 @@ def cmd_worker_source(args) -> int:
     return 0
 
 
+def cmd_stats(args) -> int:
+    stats = qqcache.Stats(cache_dir(args) / "stats.json")
+    if args.json:
+        print(json.dumps(stats.data, indent=2, sort_keys=True))
+        return 0
+    c = stats.data["cache"]
+    print(f"cache: {c.get('hit', 0)} hit, {c.get('miss', 0)} miss, {c.get('uncacheable', 0)} uncacheable")
+    for key, reasons in sorted(stats.data["fallbacks"].items()):
+        for reason, n in sorted(reasons.items()):
+            print(f"fallback {key} ({reason}): {n}")
+    if not stats.data["fallbacks"]:
+        print("fallbacks: none")
+    return 0
+
+
 def cmd_backends(args) -> int:
     print("\n".join(executor.available()))
     return 0
@@ -117,7 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--repo", default=".")
         s.add_argument("--out", default=".qq/out")
         s.add_argument("--json", action="store_true")
+        s.add_argument("--fallback", metavar="BACKEND",
+                       help="run here if the backend cannot (counted in stats)")
+        s.add_argument("--cache", metavar="DIR", help="action cache directory (default <repo>/.qq/cache)")
+        s.add_argument("--no-cache", action="store_true")
         s.set_defaults(fn=fn)
+    s = sub.add_parser("stats")
+    s.add_argument("--repo", default=".")
+    s.add_argument("--cache", metavar="DIR")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_stats)
     s = sub.add_parser("compare")
     s.add_argument("a")
     s.add_argument("b")
