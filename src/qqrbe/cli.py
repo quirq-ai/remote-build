@@ -17,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-from qqrecipes import runner
+from qqrecipes import digest, runner
 
 from qqrbe import cache as qqcache, executor, selftest, worker
 from qqrbe.errors import ExecutorError
@@ -95,6 +95,11 @@ def cmd_compare(args) -> int:
     if a["output_digests"] != b["output_digests"]:
         problems.append(f"different outputs: {a['backend']} {a['output_digests']}"
                         f" vs {b['backend']} {b['output_digests']}")
+    if args.repo:  # check the reported digests against the files actually here
+        for path, dg in b["output_digests"].items():
+            got = digest.path_digest(Path(args.repo) / path)
+            if got != dg:
+                problems.append(f"{path} here hashes to {got}, not the reported {dg}")
     if problems:
         print("qqrbe compare: FAIL\n  " + "\n  ".join(problems), file=sys.stderr)
         return 1
@@ -163,7 +168,8 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(fn=cmd_stats)
     s = sub.add_parser("compare")
     s.add_argument("a")
-    s.add_argument("b")
+    s.add_argument("b", help="the later run, whose outputs are the ones now in --repo")
+    s.add_argument("--repo", help="also hash each output under DIR (the action's workdir) and require the reported digest")
     s.set_defaults(fn=cmd_compare)
     s = sub.add_parser("worker")
     s.add_argument("--request", required=True)

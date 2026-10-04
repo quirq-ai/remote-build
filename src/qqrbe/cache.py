@@ -111,8 +111,11 @@ class ActionCache:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def _put(self, src: Path) -> str:
+    def _put(self, src: Path) -> str | None:
+        """Store a file or tree by content; None if it does not exist."""
         dg = digest.path_digest(src)
+        if dg is None:
+            return None
         dst = self._cas(dg)
         if not dst.exists():
             tmp = dst.with_name(dst.name + f".tmp{os.getpid()}")

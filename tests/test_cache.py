@@ -202,3 +202,26 @@ def test_malformed_or_failed_entry_is_a_miss(repo, tmp_path, mutate):
     ac.write_text(json.dumps(entry))
     again = ex.execute(req, env(repo, tmp_path))
     assert again.details["cache"] == "miss" and again.ok
+
+
+def test_result_whose_output_is_missing_is_not_cached(repo, tmp_path):
+    class Claims(Executor):
+        backend = "github"
+
+        def execute(self, request, env):
+            return executor.ActionResult(request.action.digest(), "github", 0, 0.1,
+                                         {selftest.OUTPUT: "sha256:" + "1" * 64})
+
+    cache = qqcache.ActionCache(tmp_path / "cache")
+    ex = qqcache.CachingExecutor(Claims(), cache)
+    req = selftest.request(repo)
+    assert ex.execute(req, env(repo, tmp_path)).details["cache"] == "miss"
+    assert cache.lookup(req.action.digest()) is None
+
+
+def test_fallback_on_a_result_without_its_files(repo, tmp_path):
+    stats = qqcache.Stats(tmp_path / "stats.json")
+    ex = qqcache.FallbackExecutor(Down(RemoteExecutionFailed("did not send the files")),
+                                  executor.load("local"), stats, warn=lambda m: None)
+    assert ex.execute(selftest.request(repo), env(repo, tmp_path)).ok
+    assert stats.data["fallbacks"] == {"github->local": {"remote-execution-failed": 1}}

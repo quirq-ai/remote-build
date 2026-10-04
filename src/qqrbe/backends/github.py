@@ -186,6 +186,12 @@ class GitHubExecutor(Executor):
                 shutil.rmtree(dst)
             dst.parent.mkdir(parents=True, exist_ok=True)
             (shutil.copytree if src.is_dir() else shutil.copyfile)(src, dst)
+        # A digest without its file proves nothing: every output reported as produced must arrive.
+        unsent = sorted(p for p, dg in res["output_digests"].items()
+                        if dg is not None and p not in packed.get("outputs", {}))
+        if unsent:
+            raise RemoteExecutionFailed(f"worker run {url} reports digests for {', '.join(unsent)}"
+                                        " but did not send the files")
         out = Path(env.out).resolve()
         slug = runner.slug(request.action)
         files = {}

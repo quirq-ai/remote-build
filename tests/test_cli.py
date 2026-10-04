@@ -33,3 +33,18 @@ def test_selftest_local(repo, tmp_path, capsys):
 
 def test_unknown_backend_is_exit_2(repo, tmp_path):
     assert cli.main(["selftest", "--backend", "nope", "--repo", str(repo), "--out", str(tmp_path)]) == 2
+
+
+def test_compare_checks_digests_against_files_here(tmp_path):
+    (tmp_path / "o").write_text("x")
+    from qqrecipes import digest
+    real = digest.path_digest(tmp_path / "o")
+    a, b = result("local", out=real), result("github", out=real)
+    pa, pb = tmp_path / "a.json", tmp_path / "b.json"
+    pa.write_text(json.dumps(a))
+    pb.write_text(json.dumps(b))
+    assert cli.main(["compare", "--repo", str(tmp_path), str(pa), str(pb)]) == 0
+    (tmp_path / "o").write_text("tampered")
+    assert cli.main(["compare", "--repo", str(tmp_path), str(pa), str(pb)]) == 1
+    (tmp_path / "o").unlink()
+    assert cli.main(["compare", "--repo", str(tmp_path), str(pa), str(pb)]) == 1

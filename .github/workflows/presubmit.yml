@@ -62,4 +62,4 @@ jobs:
       - name: same output digest on both
         run: |
           cat "$RUNNER_TEMP/local.json" "$RUNNER_TEMP/github.json"
-          qqrbe compare "$RUNNER_TEMP/local.json" "$RUNNER_TEMP/github.json"
+          qqrbe compare --repo . "$RUNNER_TEMP/local.json" "$RUNNER_TEMP/github.json"
