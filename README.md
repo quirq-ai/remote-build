@@ -20,6 +20,30 @@ gRPC.
 Out of scope for v0: a shared bazel-remote cache (v1), Buildbarn remote execution and autoscaled
 workers (v2).
 
+## How it works (v0)
+
+- An **action** is a recipes `Action` (`qqrecipes.contract`, pinned by commit): a command, an
+  input root digest, environment, declared outputs and platform properties. `Action.digest()` is
+  its key. A request (`qq-exec-request/1`) adds the repo-relative files of the input root and,
+  for remote backends, the git repository and commit to fetch them from.
+- An **executor** runs one request and returns an `ActionResult`: exit code and the digest of
+  every declared output. `qqrbe.executor.load(backend)` imports `qqrbe.backends.<backend>`;
+  nothing registers backends, so `launchpad` or `buildbarn` is one new module.
+- Before running, every executor checks that the files it sees hash to the input root digest and
+  that it is the action's platform. A failure there is a typed error (`qqrbe.errors`), never a
+  silent run on the wrong inputs. A non-zero exit code is a result, not an error.
+- Backends: `local` runs the action here through recipes' runner. `github` dispatches
+  `.github/workflows/execute.yml`, a worker that checks out the commit, verifies the input root,
+  runs the action with the local executor and sends back the result and outputs as an artifact.
+  v0 uses git as the input store. TODO(expert): a REAPI CAS (v1 shared cache).
+
+```sh
+qqrbe backends                                   # local (github in the next PR)
+qqrbe selftest --backend local                   # a small deterministic action
+qqrbe exec --request req.json --backend github   # run a qq-exec-request/1
+qqrbe compare local.json github.json             # same action, same output digests?
+```
+
 Actions are planned by the adapters in [quirq-ai/recipes](https://github.com/quirq-ai/recipes).
 Plan and every v0 item: [quirq-ai/infra-config](https://github.com/quirq-ai/infra-config),
 `docs/plan.md` and `docs/v0.md`.
@@ -28,5 +52,9 @@ Plan and every v0 item: [quirq-ai/infra-config](https://github.com/quirq-ai/infr
 
 | Item | What | PR | State |
 |---|---|---|---|
-| V0-RBE-01 | Executor interface (`local`, `github`) | | not started |
+| V0-RBE-01 | Executor interface (`local`, `github`) | #2 (interface, `local`, worker); next PR: `github` client and cross-backend check | in review |
 | V0-RBE-02 | Local action cache and fallback counters | | not started |
+
+## Working here
+
+Read `AGENTS.md`. Run the tests with `pip install -e ".[test]" && pytest`.

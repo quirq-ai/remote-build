@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qqrbe"
+version = "0.1.0"
+description = "Executor interface and action cache for quirq infra (qq): REAPI-shaped actions on local or remote backends."
+readme = "README.md"
+requires-python = ">=3.11"
+# Actions are planned by recipes, used by pinned commit (V0-REC-01, quirq-ai/recipes#2).
+# TODO(expert): let rollers move this pin.
+dependencies = ["qqrecipes @ git+https://github.com/quirq-ai/recipes@efc4ab52c7d262b5ddece293fcd66aa0d11bdfa4"]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[project.scripts]
+qqrbe = "qqrbe.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
