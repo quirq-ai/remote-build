@@ -69,7 +69,7 @@ Plan and every v0 item: [quirq-ai/infra-config](https://github.com/quirq-ai/infr
 | Item | What | PR | State |
 |---|---|---|---|
 | V0-RBE-01 | Executor interface (`local`, `github`) | #2, #3 | merged |
-| V0-RBE-02 | Local action cache and fallback counters | #4 | in review |
+| V0-RBE-02 | Local action cache and fallback counters | #4 | merged |
 
 ## Working here
 
