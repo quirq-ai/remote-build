@@ -86,7 +86,7 @@ def test_uncacheable_and_failed_actions_always_run(repo, tmp_path, monkeypatch):
     assert inner.runs == 4
 
 
-def test_corrupt_cache_entry_is_a_miss(repo, tmp_path):
+def test_missing_blobs_are_a_miss(repo, tmp_path):
     cache = qqcache.ActionCache(tmp_path / "cache")
     ex = qqcache.CachingExecutor(executor.load("local"), cache)
     req = selftest.request(repo)
@@ -132,3 +132,58 @@ def test_cli_reports_hit_and_fallback_counts(repo, tmp_path, capsys, monkeypatch
     assert cli.main(["stats", "--repo", str(repo)]) == 0
     out = capsys.readouterr().out
     assert "cache: 1 hit, 1 miss" in out and "fallback github->local (backend-unavailable): 1" in out
+
+
+def _cached(repo, tmp_path):
+    cache = qqcache.ActionCache(tmp_path / "cache")
+    ex = qqcache.CachingExecutor(executor.load("local"), cache)
+    req = selftest.request(repo)
+    first = ex.execute(req, env(repo, tmp_path))
+    return cache, ex, req, first
+
+
+def test_corrupt_blob_is_a_miss_not_a_poisoned_hit(repo, tmp_path):
+    cache, ex, req, first = _cached(repo, tmp_path)
+    blob = cache._cas(first.output_digests[selftest.OUTPUT])
+    blob.write_text("POISON\n")
+    again = ex.execute(req, env(repo, tmp_path))
+    assert again.details["cache"] == "miss"
+    assert (repo / selftest.OUTPUT).read_text() != "POISON\n"
+
+
+def test_tampered_entry_cannot_write_outside_the_repo(repo, tmp_path):
+    cache, ex, req, first = _cached(repo, tmp_path)
+    ac = cache._ac(req.action.digest())
+    entry = json.loads(ac.read_text())
+    dg = entry["result"]["output_digests"].pop(selftest.OUTPUT)
+    entry["result"]["output_digests"]["../../escaped.txt"] = dg
+    ac.write_text(json.dumps(entry))
+    assert ex.execute(req, env(repo, tmp_path)).details["cache"] == "miss"
+    assert not (repo.parent.parent / "escaped.txt").exists()
+    entry["result"]["output_digests"] = {selftest.OUTPUT: dg}
+    entry["result"]["action_digest"] = "sha256:" + "0" * 64
+    ac.write_text(json.dumps(entry))
+    assert ex.execute(req, env(repo, tmp_path)).details["cache"] == "miss"
+
+
+def test_hit_does_not_repeat_an_old_fallback(repo, tmp_path):
+    cache = qqcache.ActionCache(tmp_path / "cache")
+    fb = qqcache.FallbackExecutor(Down(BackendUnavailable("down")), executor.load("local"), cache.stats,
+                                  warn=lambda m: None)
+    ex = qqcache.CachingExecutor(fb, cache)
+    req = selftest.request(repo)
+    assert ex.execute(req, env(repo, tmp_path)).details["fallback"]["reason"] == "backend-unavailable"
+    hit = ex.execute(req, env(repo, tmp_path))
+    assert hit.details["cache"] == "hit" and "fallback" not in hit.details
+    assert cache.stats.data["fallbacks"] == {"github->local": {"backend-unavailable": 1}}
+
+
+def test_restore_does_not_write_through_a_symlink(repo, tmp_path_factory, tmp_path):
+    cache, ex, req, first = _cached(repo, tmp_path)
+    target = tmp_path_factory.mktemp("outside") / "target.txt"
+    target.write_text("keep\n")
+    out = repo / selftest.OUTPUT
+    out.unlink()
+    out.symlink_to(target)
+    assert ex.execute(req, env(repo, tmp_path)).details["cache"] == "hit"
+    assert target.read_text() == "keep\n" and not out.is_symlink()

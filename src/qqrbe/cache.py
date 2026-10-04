@@ -17,6 +17,8 @@ a typed event, counted by (from, to, reason) and kept in stats.json, and printed
 Only BackendUnavailable and RemoteExecutionFailed fall back: a bad request, wrong inputs or wrong
 platform would fail the same way anywhere.
 TODO(expert): v1 shares this through bazel-remote; add eviction and a lock for parallel writers.
+TODO(expert): a remote result is keyed by the client's toolchain pins (such as the selftest's runner
+image); workers must refuse pins that are not theirs before results are shared.
 """
 from __future__ import annotations
 
@@ -117,7 +119,10 @@ class ActionCache:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(tmp, ignore_errors=True)
             (shutil.copytree if src.is_dir() else shutil.copyfile)(src, tmp)
-            os.replace(tmp, dst)
+            try:
+                os.replace(tmp, dst)
+            except OSError:  # another writer stored the same content first
+                (shutil.rmtree if tmp.is_dir() else os.unlink)(tmp)
         return dg
 
     def store(self, request: ExecRequest, result: ActionResult, env: runner.Env) -> None:
@@ -127,41 +132,69 @@ class ActionCache:
                 return  # an output is missing or changed since the run: do not cache it
         files = {k: self._put(p) for k in ("log", "junit")
                  if (p := getattr(result, k)) is not None and Path(p).is_file()}
-        entry = {"result": result.to_json(), "files": files, "stored_at": time.time()}
+        stored = result.to_json()
+        # A cached run reports how it ran then, not how later hits ran.
+        stored["details"] = {k: v for k, v in stored["details"].items() if k not in ("cache", "fallback")}
+        entry = {"result": stored, "files": files, "stored_at": time.time()}
         path = self._ac(result.action_digest)
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, json.dumps(entry, indent=2, sort_keys=True) + "\n")
 
     def restore(self, request: ExecRequest, entry: dict, env: runner.Env) -> ActionResult | None:
-        """Put a cached run's outputs, log and JUnit in place. None if the entry is unusable."""
-        res = entry["result"]
-        cwd = (Path(env.repo) / request.action.workdir).resolve()
+        """Put a cached run's outputs, log and JUnit in place. None if the entry is unusable.
+
+        The entry is trusted only as far as it matches the request: same action digest, exactly
+        the declared outputs, and every blob re-hashed to its digest before it is copied out. A
+        corrupt blob is deleted and the lookup is a miss.
+        """
+        action = request.action
         try:
-            blobs = {path: self._cas(dg) for path, dg in res["output_digests"].items()}
-            if any(dg is None or not blobs[p].exists() for p, dg in res["output_digests"].items()):
+            res = entry["result"]
+            digests = res["output_digests"]
+            if res["action_digest"] != action.digest() or set(digests) != set(action.outputs):
                 return None
+            blobs = {}
+            for path in action.outputs:
+                dg = digests[path]
+                blob = self._cas(dg) if dg else None
+                if blob is None or not blob.exists():
+                    return None
+                if digest.path_digest(blob) != dg:
+                    (shutil.rmtree if blob.is_dir() else os.unlink)(blob)
+                    return None
+                blobs[path] = blob
+            files = {}
+            for key in ("log", "junit"):
+                if key in entry.get("files", {}):
+                    blob = self._cas(entry["files"][key])
+                    if digest.path_digest(blob) != entry["files"][key]:
+                        return None
+                    files[key] = blob
+            cwd = (Path(env.repo) / action.workdir).resolve()
             for path, blob in blobs.items():
                 dst = cwd / path
-                if dst.is_dir():
+                if dst.is_symlink() or dst.is_file():
+                    dst.unlink()  # never write through a symlink to somewhere else
+                elif dst.is_dir():
                     shutil.rmtree(dst)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 (shutil.copytree if blob.is_dir() else shutil.copyfile)(blob, dst)
-            out, slug = Path(env.out).resolve(), runner.slug(request.action)
+            out, slug = Path(env.out).resolve(), runner.slug(action)
             placed = {}
             for key, sub, ext in (("log", "logs", "log"), ("junit", "junit", "xml")):
-                if key in entry.get("files", {}):
+                if key in files:
                     dst = out / sub / f"{slug}.{ext}"
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(self._cas(entry["files"][key]), dst)
+                    shutil.copyfile(files[key], dst)
                     placed[key] = dst
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None
         return ActionResult(
-            action_digest=res["action_digest"],
+            action_digest=action.digest(),
             backend=res["backend"],
             exit_code=res["exit_code"],
             duration_s=0.0,
-            output_digests=dict(res["output_digests"]),
+            output_digests={p: digests[p] for p in action.outputs},
             log=placed.get("log"),
             junit=placed.get("junit"),
             details={**res.get("details", {}), "cache": "hit",
