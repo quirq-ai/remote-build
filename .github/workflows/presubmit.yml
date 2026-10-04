@@ -21,3 +21,32 @@ jobs:
       - run: python -m pytest -q -p no:cacheprovider
       - name: selftest on the local backend
         run: qqrbe selftest --backend local
+  cross-backend:
+    # V0-RBE-01 done-when: the same deterministic action gives the same output digest on the local
+    # backend (this job's runner) and the github backend (a second runner, through execute.yml).
+    # A PR from another repository gets a token that cannot dispatch here, so it skips this job;
+    # the merge queue still runs it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --quiet -e .
+      - run: qqrbe selftest --backend local --json > "$RUNNER_TEMP/local.json"
+      - name: selftest on the github backend
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REF: ${{ github.head_ref || github.ref_name }}
+        run: >-
+          qqrbe selftest --backend github --json --option "ref=$REF"
+          --option "repository=$GITHUB_REPOSITORY" > "$RUNNER_TEMP/github.json"
+      - name: same output digest on both
+        run: |
+          cat "$RUNNER_TEMP/local.json" "$RUNNER_TEMP/github.json"
+          qqrbe compare "$RUNNER_TEMP/local.json" "$RUNNER_TEMP/github.json"

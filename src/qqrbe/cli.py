@@ -91,7 +91,7 @@ def cmd_worker(args) -> int:
 
 def cmd_worker_source(args) -> int:
     try:
-        sys.stdout.write(worker.source_outputs(Path(args.request)))
+        sys.stdout.write(worker.source_outputs(Path(args.request), args.out and Path(args.out)))
     except ExecutorError as e:
         print(f"qqrbe: {e.reason}: {e}", file=sys.stderr)
         return 2
@@ -129,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(fn=cmd_worker)
     s = sub.add_parser("worker-source")
     s.add_argument("--request", required=True)
+    s.add_argument("--out", help="on a bad request, write its typed error here as result.json")
     s.set_defaults(fn=cmd_worker_source)
     args = p.parse_args(argv)
     return args.fn(args)

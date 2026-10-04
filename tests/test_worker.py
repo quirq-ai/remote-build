@@ -58,3 +58,12 @@ def test_output_symlink_out_of_the_repo_is_not_sent_back(repo, tmp_path_factory)
     assert worker.run(write_request(tmp_path, req), repo, out) == 2
     assert json.loads((out / "result.json").read_text())["error"]["reason"] == "bad-request"
     assert not (out / "outputs").exists()
+
+
+def test_worker_source_without_source_leaves_a_typed_error(repo, tmp_path):
+    import pytest
+    from qqrbe.errors import BadRequest
+    out = tmp_path / "result"
+    with pytest.raises(BadRequest):
+        worker.source_outputs(write_request(tmp_path, selftest.request(repo)), out)
+    assert json.loads((out / "result.json").read_text())["error"]["reason"] == "bad-request"

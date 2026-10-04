@@ -125,7 +125,7 @@ def action_from_json(data: dict) -> Action:
 
 
 def _inside(rel: str) -> bool:
-    return bool(rel) and not rel.startswith("/") and ".." not in Path(rel).parts
+    return bool(rel) and "\0" not in rel and not rel.startswith("/") and ".." not in Path(rel).parts
 
 
 def _typed(value, kind, name):
