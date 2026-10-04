@@ -161,19 +161,16 @@ class GitHubExecutor(Executor):
         if res.get("action_digest") != request.action.digest():
             raise RemoteExecutionFailed(f"worker run {url} reports action {res.get('action_digest')},"
                                         f" not the requested {request.action.digest()}")
-        if not isinstance(res.get("output_digests"), dict) or not isinstance(packed.get("outputs", {}), dict):
+        if (not isinstance(res.get("output_digests"), dict) or not isinstance(packed.get("outputs", {}), dict)
+                or not isinstance(res.get("exit_code"), int) or not isinstance(res.get("duration_s"), (int, float))):
             raise RemoteExecutionFailed(f"worker run {url} sent a malformed result")
         if set(res["output_digests"]) != set(request.action.outputs):
             raise RemoteExecutionFailed(f"worker run {url} reports outputs {sorted(res.get('output_digests', {}))},"
                                         f" not the declared {sorted(request.action.outputs)}")
         root = root.resolve()
         cwd = (Path(env.repo) / request.action.workdir).resolve()
-        for path in request.action.outputs:  # an output the remote did not produce must not linger
-            stale = cwd / path
-            if stale.is_dir() and not stale.is_symlink():
-                shutil.rmtree(stale)
-            elif stale.exists() or stale.is_symlink():
-                stale.unlink()
+        # Check everything before touching the work tree, so a bad result leaves nothing behind.
+        sources = {}
         for path, stored in packed.get("outputs", {}).items():
             src = (root / stored).resolve()
             if path not in request.action.outputs or src == root or not src.is_relative_to(root):
@@ -181,17 +178,22 @@ class GitHubExecutor(Executor):
                                             " outside what was asked for")
             if digest.path_digest(src) != res["output_digests"].get(path):
                 raise RemoteExecutionFailed(f"output {path} does not match its reported digest")
-            dst = cwd / path
-            if dst.is_dir():
-                shutil.rmtree(dst)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            (shutil.copytree if src.is_dir() else shutil.copyfile)(src, dst)
+            sources[path] = src
         # A digest without its file proves nothing: every output reported as produced must arrive.
-        unsent = sorted(p for p, dg in res["output_digests"].items()
-                        if dg is not None and p not in packed.get("outputs", {}))
+        unsent = sorted(p for p, dg in res["output_digests"].items() if dg is not None and p not in sources)
         if unsent:
             raise RemoteExecutionFailed(f"worker run {url} reports digests for {', '.join(unsent)}"
                                         " but did not send the files")
+        for path in request.action.outputs:  # an output the remote did not produce must not linger
+            stale = cwd / path
+            if stale.is_dir() and not stale.is_symlink():
+                shutil.rmtree(stale)
+            elif stale.exists() or stale.is_symlink():
+                stale.unlink()
+        for path, src in sources.items():
+            dst = cwd / path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            (shutil.copytree if src.is_dir() else shutil.copyfile)(src, dst)
         out = Path(env.out).resolve()
         slug = runner.slug(request.action)
         files = {}

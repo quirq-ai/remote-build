@@ -231,4 +231,18 @@ def test_digest_without_its_file_is_rejected(checkout, tmp_path):
     (checkout / selftest.OUTPUT).unlink(missing_ok=True)
     with pytest.raises(RemoteExecutionFailed, match="did not send the files"):
         github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
-    assert not (checkout / selftest.OUTPUT).exists()
+
+
+def test_malformed_result_is_a_typed_failure(checkout, tmp_path):
+    fake = FakeGitHub(checkout, tmp_path, tamper_result=lambda p: p["result"].pop("exit_code"))
+    with pytest.raises(RemoteExecutionFailed, match="malformed"):
+        github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
+
+
+def test_rejected_result_leaves_the_work_tree_alone(checkout, tmp_path):
+    (checkout / selftest.OUTPUT).parent.mkdir(parents=True, exist_ok=True)
+    (checkout / selftest.OUTPUT).write_text("previous\n")
+    fake = FakeGitHub(checkout, tmp_path, tamper_result=lambda p: p.update(outputs={}))
+    with pytest.raises(RemoteExecutionFailed):
+        github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
+    assert (checkout / selftest.OUTPUT).read_text() == "previous\n"
