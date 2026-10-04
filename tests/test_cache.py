@@ -187,3 +187,18 @@ def test_restore_does_not_write_through_a_symlink(repo, tmp_path_factory, tmp_pa
     out.symlink_to(target)
     assert ex.execute(req, env(repo, tmp_path)).details["cache"] == "hit"
     assert target.read_text() == "keep\n" and not out.is_symlink()
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda r: r.pop("backend"),
+    lambda r: r.update(details=[]),
+    lambda r: r.update(exit_code=3),
+])
+def test_malformed_or_failed_entry_is_a_miss(repo, tmp_path, mutate):
+    cache, ex, req, first = _cached(repo, tmp_path)
+    ac = cache._ac(req.action.digest())
+    entry = json.loads(ac.read_text())
+    mutate(entry["result"])
+    ac.write_text(json.dumps(entry))
+    again = ex.execute(req, env(repo, tmp_path))
+    assert again.details["cache"] == "miss" and again.ok

@@ -151,8 +151,9 @@ class ActionCache:
         try:
             res = entry["result"]
             digests = res["output_digests"]
-            if res["action_digest"] != action.digest() or set(digests) != set(action.outputs):
-                return None
+            if (res["action_digest"] != action.digest() or set(digests) != set(action.outputs)
+                    or res["exit_code"] != 0 or not isinstance(res.get("details", {}), dict)):
+                return None  # only successful runs are stored: anything else is not ours
             blobs = {}
             for path in action.outputs:
                 dg = digests[path]
@@ -187,19 +188,19 @@ class ActionCache:
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(files[key], dst)
                     placed[key] = dst
+            return ActionResult(
+                action_digest=action.digest(),
+                backend=res["backend"],
+                exit_code=res["exit_code"],
+                duration_s=0.0,
+                output_digests={p: digests[p] for p in action.outputs},
+                log=placed.get("log"),
+                junit=placed.get("junit"),
+                details={**res.get("details", {}), "cache": "hit",
+                         "cached_duration_s": res["duration_s"]},
+            )
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None
-        return ActionResult(
-            action_digest=action.digest(),
-            backend=res["backend"],
-            exit_code=res["exit_code"],
-            duration_s=0.0,
-            output_digests={p: digests[p] for p in action.outputs},
-            log=placed.get("log"),
-            junit=placed.get("junit"),
-            details={**res.get("details", {}), "cache": "hit",
-                     "cached_duration_s": res["duration_s"]},
-        )
 
 
 class CachingExecutor(Executor):
