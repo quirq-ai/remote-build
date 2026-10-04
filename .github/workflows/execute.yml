@@ -42,7 +42,7 @@ jobs:
         run: printf '%s' "$REQUEST" > "$RUNNER_TEMP/request.json"
       - name: read source
         id: source
-        run: qqrbe worker-source --request "$RUNNER_TEMP/request.json" >> "$GITHUB_OUTPUT"
+        run: qqrbe worker-source --request "$RUNNER_TEMP/request.json" --out "$RUNNER_TEMP/result" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: ${{ steps.source.outputs.repository }}

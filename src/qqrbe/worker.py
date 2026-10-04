@@ -80,11 +80,21 @@ def _error(out: Path, e: ExecutorError) -> int:
     return 2
 
 
-def source_outputs(request_path: Path) -> str:
-    """`key=value` lines naming the request's source, for a CI step's outputs."""
-    request = read_request(request_path)
-    if request.source is None:
-        raise BadRequest("the request has no source; a remote worker cannot fetch its inputs")
+def source_outputs(request_path: Path, out: Path | None = None) -> str:
+    """`key=value` lines naming the request's source, for a CI step's outputs.
+
+    On a bad request it also writes the typed error to `out`, so the client gets a reason even
+    though the worker never checks anything out.
+    """
+    try:
+        request = read_request(request_path)
+        if request.source is None:
+            raise BadRequest("the request has no source; a remote worker cannot fetch its inputs")
+    except ExecutorError as e:
+        if out is not None:
+            Path(out).mkdir(parents=True, exist_ok=True)
+            _error(Path(out), e)
+        raise
     return f"repository={request.source.repository}\ncommit={request.source.commit}\n"
 
 

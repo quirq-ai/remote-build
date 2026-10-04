@@ -36,9 +36,12 @@ workers (v2).
   `.github/workflows/execute.yml`, a worker that checks out the commit, verifies the input root,
   runs the action with the local executor and sends back the result and outputs as an artifact.
   v0 uses git as the input store. TODO(expert): a REAPI CAS (v1 shared cache).
+  The `github` backend needs a token with `actions: write` (QQ_GITHUB_TOKEN or GITHUB_TOKEN).
+- CI's `cross-backend` job runs `qqrbe selftest` on both backends and `qqrbe compare` fails it
+  unless both give the same action digest and the same output digests (V0-RBE-01 done-when).
 
 ```sh
-qqrbe backends                                   # local (github in the next PR)
+qqrbe backends                                   # local, github, ...
 qqrbe selftest --backend local                   # a small deterministic action
 qqrbe exec --request req.json --backend github   # run a qq-exec-request/1
 qqrbe compare local.json github.json             # same action, same output digests?
@@ -52,7 +55,7 @@ Plan and every v0 item: [quirq-ai/infra-config](https://github.com/quirq-ai/infr
 
 | Item | What | PR | State |
 |---|---|---|---|
-| V0-RBE-01 | Executor interface (`local`, `github`) | #2 (interface, `local`, worker); next PR: `github` client and cross-backend check | in review |
+| V0-RBE-01 | Executor interface (`local`, `github`) | #2 (interface, `local`, worker), #3 (`github` client, cross-backend check in CI) | in review |
 | V0-RBE-02 | Local action cache and fallback counters | | not started |
 
 ## Working here
