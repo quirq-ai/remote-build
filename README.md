@@ -38,7 +38,7 @@ workers (v2).
   v0 uses git as the input store. TODO(expert): a REAPI CAS (v1 shared cache).
 
 ```sh
-qqrbe backends                                   # local, github, ...
+qqrbe backends                                   # local (github in the next PR)
 qqrbe selftest --backend local                   # a small deterministic action
 qqrbe exec --request req.json --backend github   # run a qq-exec-request/1
 qqrbe compare local.json github.json             # same action, same output digests?

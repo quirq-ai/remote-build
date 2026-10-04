@@ -35,3 +35,26 @@ def test_worker_source_outputs(repo, tmp_path):
     req = selftest.request(repo, Source("quirq-ai/remote-build", "c" * 40))
     assert worker.source_outputs(write_request(tmp_path, req)) == (
         f"repository=quirq-ai/remote-build\ncommit={'c' * 40}\n")
+
+
+def test_unresolvable_placeholder_is_a_typed_error(repo, tmp_path):
+    import dataclasses
+    req = selftest.request(repo)
+    req = dataclasses.replace(req, action=dataclasses.replace(req.action, argv=("{adapter}/x",)))
+    out = tmp_path / "result"
+    assert worker.run(write_request(tmp_path, req), repo, out) == 2
+    assert json.loads((out / "result.json").read_text())["error"]["reason"] == "bad-request"
+
+
+def test_output_symlink_out_of_the_repo_is_not_sent_back(repo, tmp_path_factory):
+    import dataclasses
+    tmp_path = tmp_path_factory.mktemp("elsewhere")  # the repo fixture is its own tmp dir
+    secret = tmp_path / "secret"
+    secret.write_text("key\n")
+    req = selftest.request(repo)
+    action = dataclasses.replace(req.action, argv=("sh", "-c", f"ln -s {secret} link"), outputs=("link",))
+    req = dataclasses.replace(req, action=action)
+    out = tmp_path / "result"
+    assert worker.run(write_request(tmp_path, req), repo, out) == 2
+    assert json.loads((out / "result.json").read_text())["error"]["reason"] == "bad-request"
+    assert not (out / "outputs").exists()

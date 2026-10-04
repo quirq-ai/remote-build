@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: check request id
+        id: check
         env:
           REQUEST_ID: ${{ inputs.request_id }}
         run: '[[ "$REQUEST_ID" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad request_id"; exit 1; }'
@@ -51,7 +52,7 @@ jobs:
       - name: run action
         run: qqrbe worker --request "$RUNNER_TEMP/request.json" --repo .qq/src --out "$RUNNER_TEMP/result"
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && steps.check.outcome == 'success'
         with:
           name: qq-result-${{ inputs.request_id }}
           path: ${{ runner.temp }}/result

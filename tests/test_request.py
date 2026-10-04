@@ -63,3 +63,38 @@ def test_platform_mismatch(repo):
     action = dataclasses.replace(selftest.request(repo).action, platform=(("os", "plan9"),))
     with pytest.raises(PlatformMismatch):
         check_platform(action)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("timeout_s", "abc"), ("timeout_s", True), ("argv", "sh"), ("argv", []), ("env", [["A"]]),
+    ("cacheable", "yes"), ("outputs", ["/abs/secret"]), ("outputs", ["../secret"]),
+    ("workdir", "/"), ("workdir", "a/../.."),
+])
+def test_malformed_action_fields_are_bad_requests(repo, field, value):
+    data = selftest.request(repo).to_json()
+    data["action"][field] = value
+    with pytest.raises(BadRequest):
+        ExecRequest.from_json(data)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d.update(action="not an object"),
+    lambda d: d["action"].pop("digest"),
+    lambda d: d.update(inputs="selftest/words.txt"),
+])
+def test_malformed_requests_are_bad_requests(repo, mutate):
+    data = selftest.request(repo).to_json()
+    mutate(data)
+    with pytest.raises(BadRequest):
+        ExecRequest.from_json(data)
+
+
+def test_selftest_is_cacheable_only_on_a_pinned_image(repo, monkeypatch):
+    monkeypatch.delenv("ImageOS", raising=False)
+    monkeypatch.delenv("ImageVersion", raising=False)
+    ambient = selftest.request(repo).action
+    assert not ambient.cacheable and ("host", "ambient") in ambient.toolchains
+    monkeypatch.setenv("ImageOS", "ubuntu24")
+    monkeypatch.setenv("ImageVersion", "20260928.1")
+    pinned = selftest.request(repo).action
+    assert pinned.cacheable and pinned.digest() != ambient.digest()

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from qqrecipes import runner
 
+from qqrbe.errors import BadRequest
 from qqrbe.executor import ActionResult, Executor
 from qqrbe.request import ExecRequest, check_platform, verify_input_root
 
@@ -17,7 +18,10 @@ class LocalExecutor(Executor):
     def execute(self, request: ExecRequest, env: runner.Env) -> ActionResult:
         check_platform(request.action)
         verify_input_root(env.repo, request)
-        r = runner.run(request.action, env)
+        try:
+            r = runner.run(request.action, env)
+        except ValueError as e:  # a placeholder this run cannot resolve, such as {adapter}
+            raise BadRequest(f"cannot run action {request.action.digest()}: {e}") from None
         return ActionResult(
             action_digest=r.action_digest,
             backend=self.backend,

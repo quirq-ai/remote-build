@@ -72,42 +72,80 @@ class ExecRequest:
             raise BadRequest(f"not a {SCHEMA} request (schema is {_get(data, 'schema')!r})")
         try:
             action = action_from_json(data["action"])
-            inputs = tuple(data["inputs"])
+            inputs = data["inputs"]
             src = data.get("source")
             source = None if src is None else Source(src["repository"], src["commit"])
         except (KeyError, TypeError) as e:
             raise BadRequest(f"malformed {SCHEMA} request: missing or wrong field {e}") from None
+        if not isinstance(inputs, list):
+            raise BadRequest("inputs must be a list of repo-relative paths")
         for rel in inputs:
-            if not isinstance(rel, str) or rel.startswith("/") or ".." in Path(rel).parts:
+            if not isinstance(rel, str) or not _inside(rel):
                 raise BadRequest(f"input {rel!r} must be a repo-relative path inside the repo")
-        return cls(action, inputs, source)
+        return cls(action, tuple(inputs), source)
 
 
 def action_from_json(data: dict) -> Action:
     """Rebuild a recipes Action from `Action.to_json()`, checking it still has the same digest."""
-    service = data.get("service")
-    action = Action(
-        target=data["target"],
-        capability=data["capability"],
-        name=data["name"],
-        argv=tuple(data["argv"]),
-        input_root_digest=data["input_root_digest"],
-        env=tuple(tuple(kv) for kv in data.get("env", ())),
-        workdir=data.get("workdir", "."),
-        outputs=tuple(data.get("outputs", ())),
-        junit=data.get("junit"),
-        toolchains=tuple(tuple(kv) for kv in data.get("toolchains", ())),
-        adapter=data.get("adapter", ""),
-        platform=tuple(tuple(kv) for kv in data.get("platform", ())),
-        cacheable=data.get("cacheable", True),
-        timeout_s=data.get("timeout_s", 1800),
-        service=None if service is None else Service(
-            ready_path=service["ready_path"], ready_timeout_s=service["ready_timeout_s"],
-            probes=tuple(service["probes"])),
-    )
-    if "digest" in data and data["digest"] != action.digest():
-        raise BadRequest(f"action digest {data['digest']} does not match its fields ({action.digest()})")
+    if not isinstance(data, dict):
+        raise BadRequest("action must be an object")
+    try:
+        service = data.get("service")
+        action = Action(
+            target=_typed(data["target"], str, "target"),
+            capability=_typed(data["capability"], str, "capability"),
+            name=_typed(data["name"], str, "name"),
+            argv=_strs(data["argv"], "argv"),
+            input_root_digest=_typed(data["input_root_digest"], str, "input_root_digest"),
+            env=_pairs(data.get("env", []), "env"),
+            workdir=_typed(data.get("workdir", "."), str, "workdir"),
+            outputs=_strs(data.get("outputs", []), "outputs"),
+            junit=None if data.get("junit") is None else _typed(data["junit"], str, "junit"),
+            toolchains=_pairs(data.get("toolchains", []), "toolchains"),
+            adapter=_typed(data.get("adapter", ""), str, "adapter"),
+            platform=_pairs(data.get("platform", []), "platform"),
+            cacheable=_typed(data.get("cacheable", True), bool, "cacheable"),
+            timeout_s=_typed(data.get("timeout_s", 1800), int, "timeout_s"),
+            service=None if service is None else Service(
+                ready_path=_typed(service["ready_path"], str, "service.ready_path"),
+                ready_timeout_s=_typed(service["ready_timeout_s"], int, "service.ready_timeout_s"),
+                probes=_strs(service["probes"], "service.probes")),
+        )
+        claimed = data["digest"]
+    except (KeyError, TypeError, AttributeError) as e:
+        raise BadRequest(f"malformed action: missing or wrong field {e}") from None
+    if not action.argv:
+        raise BadRequest("action argv is empty")
+    for rel in (action.workdir, *action.outputs):
+        if not _inside(rel):
+            raise BadRequest(f"workdir or output {rel!r} must be a relative path inside the repo")
+    if claimed != action.digest():
+        raise BadRequest(f"action digest {claimed} does not match its fields ({action.digest()})")
     return action
+
+
+def _inside(rel: str) -> bool:
+    return bool(rel) and not rel.startswith("/") and ".." not in Path(rel).parts
+
+
+def _typed(value, kind, name):
+    # bool is an int in Python; a timeout of True is still wrong.
+    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        raise BadRequest(f"action field {name} must be {kind.__name__}, got {value!r}")
+    return value
+
+
+def _strs(value, name) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise BadRequest(f"action field {name} must be a list of strings")
+    return tuple(value)
+
+
+def _pairs(value, name) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, list) or not all(
+            isinstance(kv, list) and len(kv) == 2 and all(isinstance(x, str) for x in kv) for kv in value):
+        raise BadRequest(f"action field {name} must be a list of [key, value] string pairs")
+    return tuple(tuple(kv) for kv in value)
 
 
 def input_files(repo: Path, globs) -> tuple[str, ...]:
