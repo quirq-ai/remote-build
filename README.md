@@ -74,3 +74,7 @@ Plan and every v0 item: [quirq-ai/infra-config](https://github.com/quirq-ai/infr
 ## Working here
 
 Read `AGENTS.md`. Run the tests with `pip install -e ".[test]" && pytest`.
+
+## Licence
+
+Apache License 2.0; see `LICENSE`.
