@@ -40,11 +40,24 @@ workers (v2).
 - CI's `cross-backend` job runs `qqrbe selftest` on both backends and `qqrbe compare` fails it
   unless both give the same action digest and the same output digests (V0-RBE-01 done-when).
 
+- **Action cache** (`qqrbe.cache`, V0-RBE-02): `exec` and `selftest` look the action digest up in
+  `<repo>/.qq/cache` first. A hit restores the outputs, log and JUnit and says `cache: hit`; a miss
+  runs and stores the result if it succeeded. Actions marked `cacheable = false` (or run on an
+  ambient toolchain) always run and say `cache: uncacheable`. `--no-cache` turns it off.
+- **Fallback** (`--fallback local`): if the backend cannot run the action (`backend-unavailable`,
+  `remote-execution-failed`), it runs locally instead. Every fallback prints a `FALLBACK` line,
+  is marked in the result, and is counted by backend pair and reason in `.qq/cache/stats.json`.
+  Wrong inputs, a wrong platform or a bad request never fall back: they would fail anywhere.
+- CI shows both: a second run of the selftest must be a cache hit, and a run on `github` with no
+  token must fall back and be counted (`qqrbe stats`).
+
 ```sh
 qqrbe backends                                   # local, github, ...
 qqrbe selftest --backend local                   # a small deterministic action
 qqrbe exec --request req.json --backend github   # run a qq-exec-request/1
 qqrbe compare local.json github.json             # same action, same output digests?
+qqrbe selftest --backend github --fallback local # fall back if GitHub cannot run it, counted
+qqrbe stats                                      # cache hits/misses, fallbacks by reason
 ```
 
 Actions are planned by the adapters in [quirq-ai/recipes](https://github.com/quirq-ai/recipes).
@@ -55,8 +68,8 @@ Plan and every v0 item: [quirq-ai/infra-config](https://github.com/quirq-ai/infr
 
 | Item | What | PR | State |
 |---|---|---|---|
-| V0-RBE-01 | Executor interface (`local`, `github`) | #2 (interface, `local`, worker), #3 (`github` client, cross-backend check in CI) | in review |
-| V0-RBE-02 | Local action cache and fallback counters | | not started |
+| V0-RBE-01 | Executor interface (`local`, `github`) | #2, #3 | merged |
+| V0-RBE-02 | Local action cache and fallback counters | #4 | in review |
 
 ## Working here
 
