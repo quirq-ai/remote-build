@@ -222,3 +222,27 @@ def test_urllib_transport_keeps_the_token_off_redirects():
         server.shutdown()
     assert resp.status == 200 and resp.body == b"data"
     assert seen == {"/zip": "Bearer t0ken", "/blob": None}
+
+
+def test_digest_without_its_file_is_rejected(checkout, tmp_path):
+    def drop_file(packed):
+        packed["outputs"] = {}  # claims the digest, sends nothing
+    fake = FakeGitHub(checkout, tmp_path, tamper_result=drop_file)
+    (checkout / selftest.OUTPUT).unlink(missing_ok=True)
+    with pytest.raises(RemoteExecutionFailed, match="did not send the files"):
+        github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
+
+
+def test_malformed_result_is_a_typed_failure(checkout, tmp_path):
+    fake = FakeGitHub(checkout, tmp_path, tamper_result=lambda p: p["result"].pop("exit_code"))
+    with pytest.raises(RemoteExecutionFailed, match="malformed"):
+        github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
+
+
+def test_rejected_result_leaves_the_work_tree_alone(checkout, tmp_path):
+    (checkout / selftest.OUTPUT).parent.mkdir(parents=True, exist_ok=True)
+    (checkout / selftest.OUTPUT).write_text("previous\n")
+    fake = FakeGitHub(checkout, tmp_path, tamper_result=lambda p: p.update(outputs={}))
+    with pytest.raises(RemoteExecutionFailed):
+        github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
+    assert (checkout / selftest.OUTPUT).read_text() == "previous\n"
