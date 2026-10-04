@@ -30,9 +30,12 @@ def checkout(repo):
 class FakeGitHub:
     """Enough of the Actions API for one dispatch: the run completes on the first poll."""
 
-    def __init__(self, source_repo, tmp_path, tamper=None, dispatch_status=204):
+    def __init__(self, source_repo, tmp_path, tamper=None, dispatch_status=204, hidden_polls=0,
+                 never_completes=False, artifact_url="https://api.github.com/zip", tamper_result=None):
         self.source_repo, self.tmp, self.tamper = source_repo, tmp_path, tamper
         self.dispatch_status = dispatch_status
+        self.hidden_polls, self.never_completes = hidden_polls, never_completes
+        self.artifact_url, self.tamper_result = artifact_url, tamper_result
         self.calls, self.tokens, self.zip = [], set(), None
         self.title = None
 
@@ -46,17 +49,22 @@ class FakeGitHub:
             self.run_worker(body)
             return Response(204, b"")
         if path.endswith("/execute.yml/runs"):
+            if self.hidden_polls:  # the run takes a few polls to show up
+                self.hidden_polls -= 1
+                return Response(200, b'{"workflow_runs": []}')
             return Response(200, json.dumps({"workflow_runs": [
                 {"id": 7, "display_title": "qq-exec other", "status": "completed"},
                 {"id": 8, "display_title": self.title, "status": "in_progress",
                  "html_url": "https://github.com/run/8"}]}).encode())
+        if path.endswith("/runs/8/cancel"):
+            return Response(202, b"{}")
         if path.endswith("/runs/8"):
-            return Response(200, json.dumps({"id": 8, "status": "completed", "conclusion": "success",
+            return Response(200, json.dumps({"id": 8, "status": "queued" if self.never_completes else "completed", "conclusion": "success",
                                              "html_url": "https://github.com/run/8"}).encode())
         if path.endswith("/runs/8/artifacts"):
             return Response(200, json.dumps({"artifacts": [
-                {"name": f"qq-result-{self.request_id}", "archive_download_url": "https://dl/zip"}]}).encode())
-        if url == "https://dl/zip":
+                {"name": f"qq-result-{self.request_id}", "archive_download_url": self.artifact_url}]}).encode())
+        if url == "https://api.github.com/zip":
             return Response(200, self.zip)
         return Response(404, b"{}")
 
@@ -72,6 +80,10 @@ class FakeGitHub:
         worker.run(self.tmp / "req.json", remote, out)
         if self.tamper:
             self.tamper(out)
+        if self.tamper_result:
+            packed = json.loads((out / "result.json").read_text())
+            self.tamper_result(packed)
+            (out / "result.json").write_text(json.dumps(packed))
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as z:
             for f in out.rglob("*"):
@@ -142,3 +154,71 @@ def test_options_are_checked():
     assert executor.load("github", ref="feature", poll_s="1").ref == "feature"
     with pytest.raises(TypeError):
         executor.load("github", nope="1")
+
+
+def test_run_that_is_slow_to_appear_is_found(checkout, tmp_path):
+    fake = FakeGitHub(checkout, tmp_path, hidden_polls=3)
+    assert github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g")).ok
+    listed = [u for m, u in fake.calls if "/execute.yml/runs" in u]
+    assert len(listed) == 4 and all("created=%3E%3D" in u for u in listed)
+
+
+def test_timeout_cancels_the_run(checkout, tmp_path):
+    fake = FakeGitHub(checkout, tmp_path, never_completes=True)
+    ex = github(fake, timeout_s=0)
+    with pytest.raises(RemoteExecutionFailed, match="still in_progress"):
+        ex.execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
+    assert ("POST", "https://api.github.com/repos/quirq-ai/remote-build/actions/runs/8/cancel") in fake.calls
+
+
+@pytest.mark.parametrize("tamper_result,match", [
+    (lambda p: p["result"].update(action_digest="sha256:" + "0" * 64), "not the requested"),
+    (lambda p: p["outputs"].update({"/etc/evil": "outputs/0"}), "outside what was asked"),
+    (lambda p: p["result"]["output_digests"].update({"../evil": None}), "not the declared"),
+    (lambda p: p["result"].update(log="../../../../etc/passwd"), "outside the result"),
+])
+def test_result_cannot_point_outside_the_request(checkout, tmp_path, tamper_result, match):
+    fake = FakeGitHub(checkout, tmp_path, tamper_result=tamper_result)
+    with pytest.raises(RemoteExecutionFailed, match=match):
+        github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
+
+
+def test_token_is_only_sent_to_the_api_host(checkout, tmp_path):
+    fake = FakeGitHub(checkout, tmp_path, artifact_url="https://evil.example/zip")
+    with pytest.raises(RemoteExecutionFailed, match="refusing to send the token"):
+        github(fake).execute(selftest.request(checkout), runner.Env(repo=checkout, out=tmp_path / "g"))
+    assert not any("evil" in u for _, u in fake.calls)
+
+
+def test_urllib_transport_keeps_the_token_off_redirects():
+    """The artifact download redirects to storage; the token must not follow it."""
+    import http.server
+    import threading
+
+    from qqrbe.backends.github import _urllib_transport
+
+    seen = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen[self.path] = self.headers.get("Authorization")
+            if self.path == "/zip":
+                self.send_response(302)
+                self.send_header("Location", "/blob")
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"data")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        resp = _urllib_transport("GET", f"http://127.0.0.1:{server.server_port}/zip", "t0ken", None)
+    finally:
+        server.shutdown()
+    assert resp.status == 200 and resp.body == b"data"
+    assert seen == {"/zip": "Bearer t0ken", "/blob": None}

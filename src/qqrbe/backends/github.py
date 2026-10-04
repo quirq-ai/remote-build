@@ -8,7 +8,7 @@ output is checked against the digest the worker reported.
 The token comes from QQ_GITHUB_TOKEN or GITHUB_TOKEN and needs `actions: write` on `repository`.
 It is sent only to the GitHub API, never to the artifact storage the API redirects downloads to.
 Options (`qqrbe ... --option KEY=VALUE`): repository, workflow, ref (the branch whose worker runs),
-api, timeout_s, poll_s.
+api, timeout_s, poll_s. The worker checks the action's platform; v0 workers are ubuntu-24.04 x86_64.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from qqrecipes import digest, runner
 
 from qqrbe.errors import BY_REASON, BackendUnavailable, InputRootMismatch, RemoteExecutionFailed
 from qqrbe.executor import ActionResult, Executor
-from qqrbe.request import ExecRequest, Source, check_platform, verify_input_root
+from qqrbe.request import ExecRequest, Source, verify_input_root
 
 API = "https://api.github.com"
 DISPATCH_LIMIT = 65_000  # GitHub caps a workflow_dispatch payload at 65,535 characters
@@ -48,7 +48,7 @@ class GitHubExecutor(Executor):
 
     def __init__(self, repository: str = "quirq-ai/remote-build", workflow: str = "execute.yml",
                  ref: str = "main", api: str = API, token: str | None = None,
-                 timeout_s: float = 1800, poll_s: float = 5, transport=None, sleep=time.sleep):
+                 timeout_s: float = 1080, poll_s: float = 5, transport=None, sleep=time.sleep):
         self.repository, self.workflow, self.ref, self.api = repository, workflow, ref, api.rstrip("/")
         self.token = token
         self.timeout_s, self.poll_s = float(timeout_s), float(poll_s)
@@ -60,7 +60,6 @@ class GitHubExecutor(Executor):
         if not token:
             raise BackendUnavailable("no GitHub token: set QQ_GITHUB_TOKEN or GITHUB_TOKEN"
                                      " (it needs actions: write on " + self.repository + ")")
-        check_platform(request.action)  # v0 workers are one platform; see execute.yml
         verify_input_root(env.repo, request)
         if request.source is None:
             request = ExecRequest(request.action, request.inputs, _source_for(env.repo, request))
@@ -72,10 +71,12 @@ class GitHubExecutor(Executor):
             raise BackendUnavailable(f"request is {len(payload)} characters; a GitHub dispatch takes"
                                      f" at most {DISPATCH_LIMIT}. TODO(expert): send it through a CAS")
         started = time.monotonic()
+        # Runs created before the dispatch cannot be ours; a minute of slack for clock skew.
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
         self._call(token, "POST", f"/repos/{self.repository}/actions/workflows/{self.workflow}/dispatches",
                    {"ref": self.ref, "inputs": {"request_id": request_id, "request": payload}},
                    expect=(200, 204), what="dispatch the worker")
-        run = self._find_run(token, request_id, started)
+        run = self._find_run(token, request_id, started, since)
         run = self._wait(token, run, started)
         packed, root = self._fetch_result(token, run, request_id, env)
         if packed.get("error"):
@@ -88,6 +89,8 @@ class GitHubExecutor(Executor):
 
     def _call(self, token, method, path, body=None, expect=(200,), what="call the GitHub API") -> Response:
         url = path if path.startswith("https://") else self.api + path
+        if parse.urlsplit(url).netloc != parse.urlsplit(self.api).netloc:
+            raise RemoteExecutionFailed(f"refusing to send the token to {url}: not the API host {self.api}")
         try:
             resp = self.transport(method, url, token, body)
         except OSError as e:
@@ -97,9 +100,10 @@ class GitHubExecutor(Executor):
             raise BackendUnavailable(f"could not {what}: HTTP {resp.status} from {method} {path}: {detail}")
         return resp
 
-    def _find_run(self, token, request_id: str, started: float) -> dict:
+    def _find_run(self, token, request_id: str, started: float, since: str) -> dict:
         title = f"qq-exec {request_id}"
-        query = parse.urlencode({"event": "workflow_dispatch", "branch": self.ref, "per_page": 50})
+        query = parse.urlencode({"event": "workflow_dispatch", "branch": self.ref, "per_page": 100,
+                                 "created": f">={since}"})
         path = f"/repos/{self.repository}/actions/workflows/{self.workflow}/runs?{query}"
         deadline = started + min(self.timeout_s, 300)
         while True:
@@ -115,6 +119,11 @@ class GitHubExecutor(Executor):
     def _wait(self, token, run: dict, started: float) -> dict:
         while run.get("status") != "completed":
             if time.monotonic() > started + self.timeout_s:
+                try:  # best effort: do not leave the run holding a runner
+                    self._call(token, "POST", f"/repos/{self.repository}/actions/runs/{run['id']}/cancel",
+                               expect=(202,), what="cancel the worker run")
+                except (BackendUnavailable, RemoteExecutionFailed):
+                    pass
                 raise RemoteExecutionFailed(f"worker run {run['html_url']} still {run.get('status')}"
                                             f" after {self.timeout_s:.0f}s")
             self.sleep(self.poll_s)
@@ -142,13 +151,26 @@ class GitHubExecutor(Executor):
             raise RemoteExecutionFailed(f"worker run {run['html_url']} sent no readable result: {e}") from None
 
     def _materialize(self, request, env, packed, root: Path, run: dict, duration: float) -> ActionResult:
-        """Put outputs where a local run leaves them, after checking each one's digest."""
+        """Put outputs where a local run leaves them, after checking each one's digest.
+
+        Only what the request asked for is trusted: the action digest must be the request's, and
+        output paths must be the action's declared outputs.
+        """
         res = packed["result"]
+        url = run["html_url"]
+        if res.get("action_digest") != request.action.digest():
+            raise RemoteExecutionFailed(f"worker run {url} reports action {res.get('action_digest')},"
+                                        f" not the requested {request.action.digest()}")
+        if set(res.get("output_digests", {})) != set(request.action.outputs):
+            raise RemoteExecutionFailed(f"worker run {url} reports outputs {sorted(res.get('output_digests', {}))},"
+                                        f" not the declared {sorted(request.action.outputs)}")
+        root = root.resolve()
         cwd = (Path(env.repo) / request.action.workdir).resolve()
         for path, stored in packed.get("outputs", {}).items():
             src = (root / stored).resolve()
-            if root.resolve() not in src.parents:
-                raise RemoteExecutionFailed(f"result names output file {stored!r} outside the result")
+            if path not in request.action.outputs or not src.is_relative_to(root):
+                raise RemoteExecutionFailed(f"worker run {url} names output {path!r} at {stored!r},"
+                                            " outside what was asked for")
             if digest.path_digest(src) != res["output_digests"].get(path):
                 raise RemoteExecutionFailed(f"output {path} does not match its reported digest")
             dst = cwd / path
@@ -161,12 +183,15 @@ class GitHubExecutor(Executor):
         files = {}
         for key, sub, ext in (("log", "logs", "log"), ("junit", "junit", "xml")):
             if res.get(key):
+                src = (root / res[key]).resolve()
+                if not src.is_relative_to(root) or not src.is_file():
+                    raise RemoteExecutionFailed(f"worker run {url} names {key} file {res[key]!r} outside the result")
                 dst = out / sub / f"{slug}.{ext}"
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(root / res[key], dst)
+                shutil.copyfile(src, dst)
                 files[key] = dst
         return ActionResult(
-            action_digest=res["action_digest"],
+            action_digest=request.action.digest(),
             backend=self.backend,
             exit_code=res["exit_code"],
             duration_s=duration,

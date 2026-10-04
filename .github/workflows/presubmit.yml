@@ -24,8 +24,9 @@ jobs:
   cross-backend:
     # V0-RBE-01 done-when: the same deterministic action gives the same output digest on the local
     # backend (this job's runner) and the github backend (a second runner, through execute.yml).
-    # A fork's token cannot dispatch workflows, so fork PRs skip it; the merge queue still runs it.
-    if: github.event.pull_request.head.repo.fork != true
+    # A PR from another repository gets a token that cannot dispatch here, so it skips this job;
+    # the merge queue still runs it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
